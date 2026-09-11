@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+데이터 전처리 스크립트 - 25x25 전용 (증분 모드 지원)
+
+- NPZ에서 레이아웃(grid) 추출 → layouts.npz 통합 저장
+- S2P에서 RI → dB/degree 변환 → s_params.npz 통합 저장
+
+증분 모드:
+- LOCAL_OUTPUT_DIR 안에 유효한 preprocess_N 폴더가 있으면 그것을 base로 읽어
+  직전 결과에서 (소스에 없는 file_id) 제거 + (소스에 새로 생긴 file_id) 추가
+- base 없으면 자동으로 전체 스캔
+- 출력은 항상 preprocess_(N+1) 새 폴더 (스냅샷 자동 보존)
+
+사용법:
+    python Preprocess_25.py
+"""
+
+import os
+import shutil
+import numpy as np
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from scipy.interpolate import interp1d
+
+
+# ============================================
+# Configuration (25x25 전용)
+# ============================================
+
+# 로컬 작업 디렉터리 (25x25 원본 + 증강 데이터 읽기)
+SOURCE_DIR = Path(r'C:\2026Capstone_Data\Raw_Data_25')
+
+# 로컬 출력 디렉터리 (25 전용)
+LOCAL_OUTPUT_DIR = Path(r'C:\2026Capstone_Data\Preprocess_25')
+
+# Google Drive 출력 디렉터리 (팀 공유용, 25 전용)
+GDRIVE_OUTPUT_DIR = Path(r'G:\내 드라이브\2026_Capstone\Preprocess_25')
+
+# 보존할 최근 preprocess_N 폴더 수 (저장 성공 후 그 외 오래된 것 자동 삭제)
+KEEP_RECENT = 3
+
+AUGMENT_SUFFIXES = ['_x', '_y', '_0']
+
+# Multiprocessing worker 수 (CPU 코어 - 1, 최소 1)
+MAX_WORKERS = max(1, (os.cpu_count() or 4) - 1)
+
+# 시드 범위 필터 (기본 None = 전체 사용). 외부 스크립트에서 설정하면
+# 해당 시드 범위(SEED_MIN ~ SEED_MAX, 양끝 포함)만 전처리한다.
+SEED_MIN = None
+SEED_MAX = None
+
+# s_params.npz 안에 보관되는 RI(real/imag) 키 (정렬 고정)
+RI_KEYS = [
+    's11_real', 's12_real', 's21_real', 's22_real',
+    's11_imag', 's12_imag', 's21_imag', 's22_imag',
+]
+
+
+def _seed_in_range(stem: str) -> bool:
+    """stem('15684_x' 등)의 시드가 SEED_MIN~SEED_MAX 범위인지. 필터 미설정 시 항상 True."""
+    if SEED_MIN is None and SEED_MAX is None:
+        return True
+    try:
+        seed = int(stem.split('_')[0])
+    except ValueError:
+        return False
+    lo = SEED_MIN if SEED_MIN is not None else -(10 ** 18)
+    hi = SEED_MAX if SEED_MAX is not None else (10 ** 18)
+    return lo <= seed <= hi
+
+
+def get_range_folders(source_dir: Path) -> List[str]:
+    """범위 폴더 자동 감지 (예: '1~100', '20001~30000')"""
+    if not source_dir.exists():
+        return []
+    folders = [d.name for d in source_dir.iterdir() if d.is_dir() and '~' in d.name]
+    def extract_start(name):
+        try:
+            return int(name.split('~')[0])
+        except ValueError:
+            return 0
+    return sorted(folders, key=extract_start)
+
+
+def count_duplicate_sets(source_dir: Path) -> int:
+    """중복 데이터 폴더로 빠진 세트 수를 npz 기준으로 계산"""
+    total = 0
+    for range_name in get_range_folders(source_dir):
+        dup_npz_dir = source_dir / range_name / '중복 데이터' / 'npz'
+        if dup_npz_dir.exists():
+            total += sum(1 for f in dup_npz_dir.glob('*.npz') if f.is_file())
+    return total
+
+
+# ============================================
+# S2P Parsing
+# ============================================
+
+def parse_s2p_file(filepath: Path):
+    """S2P 파일 파싱 (RI format) → frequencies(F,), s_params_ri(F,8)"""
+    frequencies, s_data = [], []
+    with open(filepath, 'rb') as f:
+        content = f.read().decode('utf-8', errors='ignore')
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('!') or line.startswith('#'):
+            continue
+        parts = line.split()
+        if len(parts) >= 9:
+            frequencies.append(float(parts[0]))
+            s_data.append([float(parts[i]) for i in range(1, 9)])
+    return np.array(frequencies), np.array(s_data)
+
+
+# ============================================
+# Data Loading (Multiprocessing)
+# ============================================
+
+def _load_single_pair(npz_path_str: str, s2p_path_str: str, stem: str):
+    """Worker: 단일 NPZ+S2P 쌍 파싱 (병렬 처리용, 순수 파싱만 수행)"""
+    try:
+        grid = np.load(Path(npz_path_str))['grid']
+
+        frequencies, s_data = [], []
+        with open(s2p_path_str, 'rb') as f:
+            content = f.read().decode('utf-8', errors='ignore')
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith('!') or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 9:
+                frequencies.append(float(parts[0]))
+                s_data.append([float(parts[i]) for i in range(1, 9)])
+
+        freqs = np.array(frequencies)
+        s_ri = np.array(s_data)
+
+        if len(freqs) == 0 or len(s_ri) == 0:
+            return stem, None, None, None, 'empty'
+
+        return stem, grid, freqs, s_ri, 'ok'
+    except Exception as e:
+        return stem, None, None, None, str(e)
+
+
+def load_folder_data(npz_dir: Path, s2p_dir: Path, progress_label: str) -> Tuple:
+    """단일 폴더에서 npz/s2p 병렬 로드 → layouts, s_params_ri, frequencies, file_ids"""
+    if not npz_dir.exists() or not s2p_dir.exists():
+        return None, None, None, None
+
+    npz_files = {f.stem: f for f in npz_dir.glob("*.npz")}
+    s2p_files = {f.stem: f for f in s2p_dir.glob("*.s2p")}
+    common_stems = sorted(set(npz_files.keys()) & set(s2p_files.keys()))
+
+    # 시드 범위 필터 (SEED_MIN/SEED_MAX 미설정 시 전체 통과)
+    common_stems = [s for s in common_stems if _seed_in_range(s)]
+
+    if not common_stems:
+        return None, None, None, None
+
+    # Phase A: 병렬 파싱 (워커에서는 순수 I/O + 파싱만 수행)
+    results = {}
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {}
+        for stem in common_stems:
+            future = executor.submit(
+                _load_single_pair,
+                str(npz_files[stem]), str(s2p_files[stem]), stem
+            )
+            futures[future] = stem
+
+        total = len(futures)
+        for i, future in enumerate(as_completed(futures), 1):
+            stem, grid, freqs, s_ri, status = future.result()
+            if status == 'ok':
+                results[stem] = (grid, freqs, s_ri)
+            elif status == 'empty':
+                print(f"\n      [SKIP] {stem}.s2p - 데이터 없음")
+            else:
+                print(f"\n      [ERROR] {stem} - {status}")
+            print(f"\r      {progress_label}: {i}/{total}", end="", flush=True)
+        print()
+
+    if not results:
+        return None, None, None, None
+
+    # Phase B: 정렬 순서대로 주파수 보간 (결정성 보장, 메인 프로세스)
+    layouts, s_params_list, file_ids = [], [], []
+    frequencies = None
+
+    for stem in common_stems:
+        if stem not in results:
+            continue
+        grid, freqs, s_ri = results[stem]
+
+        if frequencies is None:
+            frequencies = freqs
+
+        # 주파수 길이 불일치 시 보간
+        if len(freqs) != len(frequencies) or not np.allclose(freqs, frequencies):
+            interpolator = interp1d(freqs, s_ri, axis=0, kind='linear', fill_value='extrapolate')
+            s_ri = interpolator(frequencies)
+
+        layouts.append(grid)
+        s_params_list.append(s_ri)
+        file_ids.append(stem)
+
+    return (
+        np.array(layouts, dtype=np.float32),
+        np.array(s_params_list, dtype=np.float32),
+        np.array(frequencies, dtype=np.float32) if frequencies is not None else None,
+        file_ids
+    )
+
+
+def collect_all_data() -> Tuple:
+    """모든 범위 폴더에서 원본 + 증강 데이터 수집 (전체 스캔)"""
+    range_folders = get_range_folders(SOURCE_DIR)
+    if not range_folders:
+        print(f"  [WARNING] {SOURCE_DIR}에서 범위 폴더를 찾을 수 없습니다.")
+        return None, None, None, [], []
+
+    # 처리할 변형 목록: (npz 서브폴더, s2p 서브폴더, variant_name)
+    variant_configs = [('npz', 's2p', 'original')]
+    for suffix in AUGMENT_SUFFIXES:
+        variant_configs.append((f'npz{suffix}', f's2p{suffix}', suffix.lstrip('_')))
+
+    all_layouts, all_s_params, all_file_ids, all_variants = [], [], [], []
+    frequencies = None
+
+    for range_name in range_folders:
+        range_path = SOURCE_DIR / range_name
+        print(f"\n  [Renewal] {range_name}")
+
+        for npz_sub, s2p_sub, variant_name in variant_configs:
+            npz_dir = range_path / npz_sub
+            s2p_dir = range_path / s2p_sub
+
+            progress_label = f"{range_name}/{variant_name}"
+            layouts, s_params, freqs, file_ids = load_folder_data(
+                npz_dir, s2p_dir, progress_label
+            )
+            if layouts is None:
+                continue
+
+            print(f"    {variant_name:>10}: {len(layouts):>6}개")
+            all_layouts.append(layouts)
+            all_s_params.append(s_params)
+            all_file_ids.extend(file_ids)
+            all_variants.extend([variant_name] * len(layouts))
+
+            if frequencies is None:
+                frequencies = freqs
+
+    if not all_layouts:
+        return None, None, None, [], []
+
+    return (
+        np.concatenate(all_layouts, axis=0),
+        np.concatenate(all_s_params, axis=0),
+        frequencies,
+        all_file_ids,
+        all_variants
+    )
+
+
+# ============================================
+# Incremental: base 탐지/로드 + 소스 enumerate + 부분 파싱
+# ============================================
+
+def find_base_and_next_counter(output_dir: Path) -> Tuple[Optional[Path], int]:
+    """출력 폴더에서 가장 큰 preprocess_N (layouts.npz + s_params.npz 둘 다 있는) 찾기.
+
+    반환: (base_dir 또는 None, 다음 출력 카운터 N+1)
+    """
+    if not output_dir.exists():
+        return None, 1
+
+    valid_ns: List[Tuple[int, Path]] = []
+    all_ns: List[int] = []
+    for d in output_dir.iterdir():
+        if not d.is_dir() or not d.name.startswith('preprocess_'):
+            continue
+        try:
+            n = int(d.name.split('_')[1])
+        except (IndexError, ValueError):
+            continue
+        all_ns.append(n)
+        if (d / 'layouts.npz').exists() and (d / 's_params.npz').exists():
+            valid_ns.append((n, d))
+
+    if not valid_ns:
+        next_counter = (max(all_ns) + 1) if all_ns else 1
+        return None, next_counter
+
+    valid_ns.sort()
+    base_n, base_dir = valid_ns[-1]
+    # next counter = max(all preprocess_N) + 1 (불완전 폴더 포함해 충돌 방지)
+    next_counter = max(max(all_ns), base_n) + 1
+    return base_dir, next_counter
+
+
+def prune_old_preprocess(output_dir: Path, keep: int = KEEP_RECENT) -> None:
+    """가장 높은 번호의 preprocess_N keep개만 남기고 나머지 폴더 삭제.
+
+    - 저장/업로드가 성공한 뒤에만 호출할 것 (실패 시 기존 보존).
+    - base는 항상 '가장 높은 번호'라 최신 keep개(>=1) 안에 들어가므로 안전.
+    """
+    if not output_dir.exists():
+        return
+
+    ns: List[Tuple[int, Path]] = []
+    for d in output_dir.iterdir():
+        if not d.is_dir() or not d.name.startswith('preprocess_'):
+            continue
+        try:
+            n = int(d.name.split('_')[1])
+        except (IndexError, ValueError):
+            continue
+        ns.append((n, d))
+
+    if len(ns) <= keep:
+        return
+
+    ns.sort()
+    for n, d in ns[:-keep]:
+        try:
+            shutil.rmtree(d)
+            print(f"  [정리] 오래된 preprocess 삭제: {d}")
+        except OSError as e:
+            print(f"  [정리] 삭제 실패: {d} - {e}")
+
+
+def load_base_preprocess(base_dir: Path) -> Dict:
+    """직전 preprocess 출력 로드.
+
+    반환:
+      {
+        'layouts':    (N, H, W) float32,
+        'file_ids':   (N,) str array,
+        'variants':   (N,) str array,
+        'frequencies':(F,) float32,
+        'ri':         {key: (N, F) float32, ...}  # 8개 키 (real/imag)
+      }
+    """
+    layouts_data = np.load(base_dir / 'layouts.npz')
+    s_data = np.load(base_dir / 's_params.npz')
+
+    file_ids = np.array([str(x) for x in layouts_data['file_ids']])
+    variants = np.array([str(x) for x in layouts_data['variants']])
+
+    ri = {k: s_data[k] for k in RI_KEYS}
+
+    return {
+        'layouts': layouts_data['layouts'],
+        'file_ids': file_ids,
+        'variants': variants,
+        'frequencies': s_data['frequencies'],
+        'ri': ri,
+    }
+
+
+def enumerate_source_pairs(source_dir: Path) -> Dict[str, Tuple[str, Path, Path]]:
+    """소스 디렉터리 전체를 스캔하여 {file_id: (variant, npz_path, s2p_path)} 반환.
+
+    file_id 는 npz/s2p stem (예: '12345' 원본, '12345_x' x변환). 각 stem은
+    하나의 (variant, npz, s2p) 조합에만 매칭된다.
+    SEED_MIN/SEED_MAX 필터 적용.
+    """
+    range_folders = get_range_folders(source_dir)
+    variant_configs = [('npz', 's2p', 'original')]
+    for suffix in AUGMENT_SUFFIXES:
+        variant_configs.append((f'npz{suffix}', f's2p{suffix}', suffix.lstrip('_')))
+
+    result: Dict[str, Tuple[str, Path, Path]] = {}
+    for range_folder in range_folders:
+        range_path = source_dir / range_folder
+        for npz_sub, s2p_sub, variant_name in variant_configs:
+            npz_dir = range_path / npz_sub
+            s2p_dir = range_path / s2p_sub
+            if not (npz_dir.exists() and s2p_dir.exists()):
+                continue
+            npz_files = {f.stem: f for f in npz_dir.glob('*.npz')}
+            s2p_files = {f.stem: f for f in s2p_dir.glob('*.s2p')}
+            common = set(npz_files.keys()) & set(s2p_files.keys())
+            for stem in common:
+                if not _seed_in_range(stem):
+                    continue
+                if stem in result:
+                    # 동일 stem이 여러 폴더에 나타나는 비정상 케이스 (보통 발생 X)
+                    continue
+                result[stem] = (variant_name, npz_files[stem], s2p_files[stem])
+    return result
+
+
+def parse_new_files(
+    pairs_to_parse: Dict[str, Tuple[str, Path, Path]],
+    reference_frequencies: Optional[np.ndarray] = None,
+    progress_label: str = "신규",
+) -> Tuple:
+    """지정된 (file_id → (variant, npz, s2p)) 부분만 병렬 파싱.
+
+    reference_frequencies 가 주어지면 그것에 보간 (base와 frequency 격자 일치 보장).
+    반환: (layouts(N,H,W), s_params_ri(N,F,8), frequencies(F,), file_ids list, variants list)
+    """
+    if not pairs_to_parse:
+        return None, None, reference_frequencies, [], []
+
+    sorted_stems = sorted(pairs_to_parse.keys())
+
+    results = {}
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {}
+        for stem in sorted_stems:
+            variant, npz_path, s2p_path = pairs_to_parse[stem]
+            futures[executor.submit(_load_single_pair,
+                                    str(npz_path), str(s2p_path), stem)] = stem
+
+        total = len(futures)
+        for i, future in enumerate(as_completed(futures), 1):
+            stem, grid, freqs, s_ri, status = future.result()
+            if status == 'ok':
+                results[stem] = (grid, freqs, s_ri)
+            elif status == 'empty':
+                print(f"\n      [SKIP] {stem}.s2p - 데이터 없음")
+            else:
+                print(f"\n      [ERROR] {stem} - {status}")
+            print(f"\r      {progress_label}: {i}/{total}", end="", flush=True)
+        print()
+
+    if not results:
+        return None, None, reference_frequencies, [], []
+
+    # 기준 주파수 격자: reference 우선, 없으면 첫 샘플
+    frequencies = reference_frequencies
+    if frequencies is None:
+        for stem in sorted_stems:
+            if stem in results:
+                frequencies = results[stem][1]
+                break
+
+    layouts, s_params_list, file_ids, variants = [], [], [], []
+    for stem in sorted_stems:
+        if stem not in results:
+            continue
+        grid, freqs, s_ri = results[stem]
+        if len(freqs) != len(frequencies) or not np.allclose(freqs, frequencies):
+            interpolator = interp1d(freqs, s_ri, axis=0, kind='linear', fill_value='extrapolate')
+            s_ri = interpolator(frequencies)
+        layouts.append(grid)
+        s_params_list.append(s_ri)
+        file_ids.append(stem)
+        variants.append(pairs_to_parse[stem][0])
+
+    return (
+        np.array(layouts, dtype=np.float32),
+        np.array(s_params_list, dtype=np.float32),
+        np.array(frequencies, dtype=np.float32),
+        file_ids,
+        variants,
+    )
+
+
+# ============================================
+# Save
+# ============================================
+
+def split_ri(s_params_ri: np.ndarray) -> Dict[str, np.ndarray]:
+    """(N, F, 8) RI 형식 → {key: (N, F)} real/imag dict (8개 키)"""
+    return {
+        's11_real': s_params_ri[:, :, 0],
+        's12_real': s_params_ri[:, :, 2],
+        's21_real': s_params_ri[:, :, 4],
+        's22_real': s_params_ri[:, :, 6],
+        's11_imag': s_params_ri[:, :, 1],
+        's12_imag': s_params_ri[:, :, 3],
+        's21_imag': s_params_ri[:, :, 5],
+        's22_imag': s_params_ri[:, :, 7],
+    }
+
+
+def _write_outputs(output_dir: Path, layouts, ri: Dict[str, np.ndarray],
+                   frequencies, file_ids, variants,
+                   gdrive_output_dir: Optional[Path] = None):
+    """실제 디스크 기록 (RI 형식 입력). save_data와 incremental 양쪽이 공유."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    np.savez_compressed(
+        output_dir / 'layouts.npz',
+        layouts=layouts,
+        file_ids=np.array(file_ids),
+        variants=np.array(variants),
+    )
+
+    np.savez_compressed(
+        output_dir / 's_params.npz',
+        frequencies=frequencies,
+        **{k: ri[k] for k in RI_KEYS},
+    )
+
+    # 파일 크기 출력
+    total_size = 0
+    for f in [output_dir / 'layouts.npz', output_dir / 's_params.npz']:
+        size_mb = f.stat().st_size / (1024 * 1024)
+        total_size += size_mb
+        print(f"    {f.name:25s} {size_mb:>8.1f} MB")
+    print(f"    {'TOTAL':25s} {total_size:>8.1f} MB")
+
+    if gdrive_output_dir is not None:
+        try:
+            gdrive_output_dir.mkdir(parents=True, exist_ok=True)
+            for fname in ['layouts.npz', 's_params.npz']:
+                shutil.copy2(str(output_dir / fname), str(gdrive_output_dir / fname))
+            print(f"\n    [Upload] Google Drive 업로드 완료: {gdrive_output_dir}")
+        except Exception as e:
+            print(f"\n    [WARNING] Google Drive 업로드 실패: {e}")
+            print(f"    → 로컬 저장은 정상 완료됨")
+
+
+def save_data(output_dir: Path, layouts, s_params_ri, frequencies, file_ids, variants,
+              gdrive_output_dir: Optional[Path] = None):
+    """RI 형식 입력 → 8개 키로 분리 후 저장 (전체 스캔/seed_range 호환용)."""
+    ri = split_ri(s_params_ri)
+    _write_outputs(output_dir, layouts, ri, frequencies, file_ids, variants,
+                   gdrive_output_dir)
+
+
+# ============================================
+# Main
+# ============================================
+
+def _print_variant_dist(variants):
+    counts = {}
+    for v in variants:
+        counts[str(v)] = counts.get(str(v), 0) + 1
+    print(f"  변형별 분포:")
+    for v, c in sorted(counts.items()):
+        print(f"    {v:>10}: {c:>6}개")
+
+
+def _run_full(output_subdir: Path, gdrive_subdir: Path):
+    """전체 스캔 경로 (base 없음)."""
+    print(f"\n[1] 데이터 로드 중 (전체 스캔)...")
+    layouts, s_params_ri, frequencies, file_ids, variants = collect_all_data()
+
+    if layouts is None:
+        print("\n[ERROR] 처리할 데이터가 없습니다.")
+        return False
+
+    duplicate_sets = count_duplicate_sets(SOURCE_DIR)
+
+    print(f"\n[2] 데이터 요약")
+    if duplicate_sets:
+        print(f"  총 샘플 수: {len(layouts):,}개 (중복 제외 {duplicate_sets:,}개)")
+    else:
+        print(f"  총 샘플 수: {len(layouts):,}개")
+    print(f"  레이아웃 shape: {layouts.shape}")
+    print(f"  S파라미터 shape: {s_params_ri.shape}")
+    print(f"  주파수 포인트: {len(frequencies)}")
+    print(f"  주파수 범위: {frequencies[0]:.4f} ~ {frequencies[-1]:.4f} GHz")
+
+    eps = 1e-10
+    s11_mag = np.sqrt(s_params_ri[:,:,0]**2 + s_params_ri[:,:,1]**2)
+    s21_mag = np.sqrt(s_params_ri[:,:,4]**2 + s_params_ri[:,:,5]**2)
+    print(f"\n[3] S파라미터 통계 (dB)")
+    print(f"  S11: {20*np.log10(s11_mag.min()+eps):.2f} ~ {20*np.log10(s11_mag.max()+eps):.2f} dB")
+    print(f"  S21: {20*np.log10(s21_mag.min()+eps):.2f} ~ {20*np.log10(s21_mag.max()+eps):.2f} dB")
+
+    print()
+    _print_variant_dist(variants)
+
+    print(f"\n[4] 저장 중...")
+    save_data(output_subdir, layouts, s_params_ri, frequencies, file_ids, variants,
+              gdrive_output_dir=gdrive_subdir)
+    return True
+
+
+def _run_incremental(base_dir: Path, output_subdir: Path, gdrive_subdir: Path):
+    """증분 경로 (base 활용)."""
+    print(f"\n[1] Base 로드 중: {base_dir}")
+    base = load_base_preprocess(base_dir)
+    base_count = len(base['file_ids'])
+    print(f"  Base 샘플 수: {base_count:,}개")
+    print(f"  Base 주파수 포인트: {len(base['frequencies'])}")
+
+    print(f"\n[2] 소스 디렉터리 스캔 중...")
+    current = enumerate_source_pairs(SOURCE_DIR)
+    print(f"  현재 소스 샘플 수: {len(current):,}개")
+
+    old_ids = set(base['file_ids'].tolist())
+    current_ids = set(current.keys())
+    to_keep = old_ids & current_ids
+    to_remove = old_ids - current_ids
+    to_add = current_ids - old_ids
+
+    print(f"\n[3] Diff 결과")
+    print(f"  유지(base ∩ source): {len(to_keep):,}개")
+    print(f"  제거(base only):     {len(to_remove):,}개")
+    print(f"  신규(source only):   {len(to_add):,}개")
+
+    # base 필터링 (제거 대상 drop)
+    if to_remove:
+        keep_mask = np.array([fid in to_keep for fid in base['file_ids']], dtype=bool)
+    else:
+        keep_mask = np.ones(base_count, dtype=bool)
+
+    kept_layouts = base['layouts'][keep_mask]
+    kept_file_ids = base['file_ids'][keep_mask]
+    kept_variants = base['variants'][keep_mask]
+    kept_ri = {k: v[keep_mask] for k, v in base['ri'].items()}
+    frequencies = base['frequencies']
+
+    # 신규 파싱
+    if to_add:
+        print(f"\n[4] 신규 파싱 중 ({len(to_add):,}개)...")
+        new_subset = {fid: current[fid] for fid in to_add}
+        new_layouts, new_s_ri, _new_freqs, new_file_ids, new_variants = parse_new_files(
+            new_subset, reference_frequencies=frequencies
+        )
+        if new_layouts is None or len(new_file_ids) == 0:
+            print("  [WARNING] 신규 파싱 결과 0개")
+            final_layouts = kept_layouts
+            final_file_ids = list(kept_file_ids)
+            final_variants = list(kept_variants)
+            final_ri = kept_ri
+        else:
+            new_ri = split_ri(new_s_ri)
+            final_layouts = np.concatenate([kept_layouts, new_layouts], axis=0) \
+                if len(kept_layouts) else new_layouts
+            final_file_ids = list(kept_file_ids) + list(new_file_ids)
+            final_variants = list(kept_variants) + list(new_variants)
+            final_ri = {
+                k: (np.concatenate([kept_ri[k], new_ri[k]], axis=0)
+                    if len(kept_ri[k]) else new_ri[k])
+                for k in RI_KEYS
+            }
+    else:
+        print(f"\n[4] 신규 데이터 없음 - base 필터링만 적용")
+        final_layouts = kept_layouts
+        final_file_ids = list(kept_file_ids)
+        final_variants = list(kept_variants)
+        final_ri = kept_ri
+
+    print(f"\n[5] 최종 통계")
+    duplicate_sets = count_duplicate_sets(SOURCE_DIR)
+    if duplicate_sets:
+        print(f"  총 샘플 수: {len(final_file_ids):,}개 (중복 제외 {duplicate_sets:,}개)")
+    else:
+        print(f"  총 샘플 수: {len(final_file_ids):,}개")
+    print(f"  레이아웃 shape: {final_layouts.shape}")
+    print(f"  주파수 포인트: {len(frequencies)}")
+    print(f"  주파수 범위: {frequencies[0]:.4f} ~ {frequencies[-1]:.4f} GHz")
+    print()
+    _print_variant_dist(final_variants)
+
+    print(f"\n[6] 저장 중...")
+    _write_outputs(output_subdir, final_layouts, final_ri, frequencies,
+                   final_file_ids, final_variants,
+                   gdrive_output_dir=gdrive_subdir)
+    return True
+
+
+def main():
+    start_time = datetime.now()
+    output_dir = LOCAL_OUTPUT_DIR
+
+    base_dir, local_next = find_base_and_next_counter(output_dir)
+    # GDrive 측 기존 preprocess_N도 확인해 더 큰 번호를 채택 (덮어쓰기 방지)
+    _, gdrive_next = find_base_and_next_counter(GDRIVE_OUTPUT_DIR)
+    counter = max(local_next, gdrive_next)
+    output_subdir = output_dir / f"preprocess_{counter}"
+    gdrive_subdir = GDRIVE_OUTPUT_DIR / f"preprocess_{counter}"
+
+    print("=" * 60)
+    print("  Renewal 25x25 RF Filter 전처리")
+    print("=" * 60)
+    print(f"\n[설정]")
+    print(f"  시작 시간: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  증강 포함: True")
+    print(f"  소스: {SOURCE_DIR}")
+    print(f"  로컬 출력: {output_subdir}")
+    print(f"  GDrive 출력: {gdrive_subdir}")
+    if base_dir is not None:
+        print(f"  Base (증분 모드): {base_dir}")
+    else:
+        print(f"  Base 없음 → 전체 스캔 모드")
+
+    if base_dir is None:
+        ok = _run_full(output_subdir, gdrive_subdir)
+    else:
+        ok = _run_incremental(base_dir, output_subdir, gdrive_subdir)
+
+    if not ok:
+        return
+
+    # 저장·업로드 성공 후: 로컬/GDrive 모두 최신 KEEP_RECENT개만 남기고 정리
+    prune_old_preprocess(output_dir)
+    prune_old_preprocess(GDRIVE_OUTPUT_DIR)
+
+    end_time = datetime.now()
+    elapsed = end_time - start_time
+    minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
+
+    print(f"\n{'=' * 60}")
+    print(f"  전처리 완료!")
+    print(f"  시작: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  완료: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  소요: {minutes}분 {seconds}초")
+    print(f"  로컬 출력: {output_subdir}")
+    print(f"  GDrive 출력: {gdrive_subdir}")
+    print(f"{'=' * 60}")
+
+
+if __name__ == "__main__":
+    main()
