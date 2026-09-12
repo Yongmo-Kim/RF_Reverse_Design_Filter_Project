@@ -1,0 +1,69 @@
+#!/bin/bash
+#PBS -V
+#PBS -N coral_batch_inverse
+#PBS -q base_g
+#PBS -l select=1:ncpus=8:ngpus=1:mem=100gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+
+cd /scratch/home/yongmo0415/deeplearning
+
+source /scratch/app/anaconda3/etc/profile.d/conda.sh
+conda activate resnet18
+
+module load cuda/12.5
+
+mkdir -p logs results/batch_inverse
+
+exec > "logs/batch_inverse_${PBS_JOBID}.log" 2>&1
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMBA_NUM_THREADS=1
+export MPLBACKEND=Agg
+
+echo "========================================"
+echo "Job ID: $PBS_JOBID"
+echo "Node: $(hostname)"
+echo "Start: $(date)"
+echo "Workdir: $(pwd)"
+echo "Python: $(which python)"
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "========================================"
+
+nvidia-smi || true
+
+python -c "import torch; print('torch:', torch.__version__); print('cuda:', torch.cuda.is_available()); print('device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+python -c "import numpy, scipy, sklearn; print('numeric packages OK')"
+python -c "import matplotlib; print('matplotlib OK')" || echo "matplotlib missing: PNG plots will be skipped, but CSV/NPZ will still be saved"
+
+python -m py_compile CorRaL_V4/batch_inverse/run_batch_inverse.py
+
+python CorRaL_V4/batch_inverse/run_batch_inverse.py \
+  --model-dir 25x25_outputs \
+  --output-dir "results/batch_inverse/bpf_6_8_${PBS_JOBID}" \
+  --f-low 6 \
+  --f-high 8 \
+  --insertion-loss -3 \
+  --return-loss -10 \
+  --stopband-loss -12 \
+  --algorithm ga_dbs \
+  --pop-size 512 \
+  --generations 160 \
+  --dbs-top 32 \
+  --dbs-passes 2 \
+  --gd-top 32 \
+  --gd-steps 240 \
+  --gd-lr 0.08 \
+  --chunk-size 512 \
+  --top-k 100 \
+  --min-hamming-frac 0.08 \
+  --min-response-rms 1.25 \
+  --archive-extra-random 96 \
+  --seed 42 \
+  --use-final
+
+echo "========================================"
+echo "Finish: $(date)"
+echo "Result dir: results/batch_inverse/bpf_6_8_${PBS_JOBID}"
+echo "========================================"
