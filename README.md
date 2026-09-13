@@ -78,11 +78,11 @@ graph TD
 | :--- | :--- | :--- | :--- |
 | **기판 (Substrate)** | 기판 가로 x 세로 크기 | **20.0 mm x 20.0 mm** | 기존 35x35mm 대비 연산량 및 데이터 범용성을 위해 20mm 축소 |
 | | 기판 두께 (Height, H) | **1.2 mm** | 실제 PCB 제작 환경 및 내구성 고려한 표준 규격 |
-| | 비유전율 (Relative Permittivity, $\varepsilon_r$) | **4.0** | 상용 FR-4 유사 유전체 물성 적용 |
-| | 유전 정접 (Loss Tangent, $\tan\delta$) | **0.013** | 고주파 유전체 손실 모사 |
-| | 기판 영역 내부 메쉬 크기 | **1.0 mm** (유전체 파장 $\lambda_d / 5$) | 전자기장이 극단적으로 집중되지 않으므로 연산 속도 확보용 조정 |
+| | 비유전율 (Relative Permittivity, εr) | **4.0** | 상용 FR-4 유사 유전체 물성 적용 |
+| | 유전 정접 (Loss Tangent, tanδ) | **0.013** | 고주파 유전체 손실 모사 |
+| | 기판 영역 내부 메쉬 크기 | **1.0 mm** (유전체 파장 λd / 5) | 전자기장이 극단적으로 집중되지 않으므로 연산 속도 확보용 조정 |
 | **상부 도체 (Top Layer)** | 픽셀 패턴 금속 재질 | **순금 (Gold, Au)** | 고주파 전도도 우수성 및 산화 방지 기준 |
-| | 금속 전도도 (Conductivity, $\sigma$) | **$4.1 \times 10^7 \text{ S/m}$** | 고주파 표피 저항 손실 정밀 계산용 |
+| | 금속 전도도 (Conductivity, \sigma) | **4.1 × 10⁷ S/m** | 고주파 표피 저항 손실 정밀 계산용 |
 | | 도체(트레이스) 두께 | **0.017 mm (17 ㎛)** | 표준 0.5 oz 동박(Copper) 두께와 동일 |
 | **하부 접지 (Bottom Layer)**| 그라운드 플레인 (Ground Plane) | **전면 도체 (Solid Metal)** | 완전 도체 접지면 형성 |
 | | 접지면 두께 | **0.017 mm (17 ㎛)** | 상부 도체와 동일 두께 |
@@ -98,7 +98,7 @@ graph TD
 | | 전체 픽셀 활성 영역 | **10.0 mm x 10.0 mm** | 기판 중앙에 배치 (기판 외곽선으로부터 5.0mm 안쪽 마진) |
 | | 대각 연결(Chamfer) 제거 | **Mosaic v2 구조 적용** | 대각선 삼각 연결 로직을 완전히 제거하여 딥러닝 입력의 단순성 확보 |
 | | 랜덤 생성 밀도 가중치 | **25% ~ 60% 가중 확률 분포** | 지나친 오픈/쇼트 패턴을 방지하고 유효 공진 패턴 집중 생성 |
-| **입출력 포트** | 포트 타입 (Port Type) | **50Ω 럼프드 포트 (Lumped Port)** | 2-Port 네트워크 $S_{11}, S_{21}, S_{12}, S_{22}$ 전송 파라미터 추출 |
+| **입출력 포트** | 포트 타입 (Port Type) | **50Ω 럼프드 포트 (Lumped Port)** | 2-Port 네트워크 S11, S21, S12, S22 전송 파라미터 추출 |
 | | 포트 접속선 (Feed Line) | 좌/우측 대칭 2개소 배치 | 폭: **1.2 mm**, 길이: **3.0 mm** (50Ω 특성 임피던스 매칭 선폭) |
 | | 포트 Y축 기준 위치 | **Y = 10.0 mm (기판 정중앙)** | 대칭 구조 급전 및 반사손실 최소화 |
 
@@ -108,8 +108,8 @@ graph TD
 | 구분 | 설계 항목 (Parameter) | 상세 설정값 및 규격 | 엔지니어링 설계 의도 및 비고 |
 | :--- | :--- | :--- | :--- |
 | **에어박스 크기** | X축 및 Y축 크기 | **40.0 mm x 40.0 mm** | 기판(20x20mm)의 정확히 **2배** 설정 (ADS와 동일한 방사 특성 확인) |
-| | 에어박스 순수 높이 ($Z_{\text{air}}$) | **9.375 mm** | $\lambda/4$ 설정 시 메모리 킬 발생 $\rightarrow$ 반복 튜닝으로 찾은 **최적 높이** |
-| | 전체 3D 해석 영역 높이 ($Z_{\text{total}}$)| **약 10.592 mm** | 접지 바닥부터 기판(1.2) + 도체(0.017) + 에어(9.375)의 총합 |
+| | 에어박스 순수 높이 (Z_air) | **9.375 mm** | λ/4 설정 시 메모리 킬 발생 \rightarrow 반복 튜닝으로 찾은 **최적 높이** |
+| | 전체 3D 해석 영역 높이 (Z_total)| **약 10.592 mm** | 접지 바닥부터 기판(1.2) + 도체(0.017) + 에어(9.375)의 총합 |
 | **흡수 경계 조건** | 5개 면 경계 조건 (상단, 전/후/좌/우) | **2차 Bayliss-Turkel ABC** | 방사되는 고주파 전자기파가 반사 없이 완벽히 흡수되도록 설정 |
 | | 바닥면 경계 조건 | **PEC (Perfect Electric Conductor)** | 하부 접지면과 일체화하여 외부 방사 차단 및 접지 기준 형성 |
 
@@ -118,9 +118,9 @@ graph TD
 ### 🕸️ 4) 물리 현상 기반 가변 메쉬(Mesh) 및 연산 최적화 전략
 | 구분 | 설계 항목 (Parameter) | 상세 메쉬 크기 | 물리 현상 고려 이유 (Physics-Aware Reason) |
 | :--- | :--- | :--- | :--- |
-| **도체 모서리** | 금속 가장자리 최소 메쉬 크기 | **약 0.333 mm** (유전체 파장 $\lambda_d / 15$) | **Skin Effect(표피 효과):** 고주파에서 전류가 도체 표면/에지에 집중되므로 초미세 메쉬 필수 |
+| **도체 모서리** | 금속 가장자리 최소 메쉬 크기 | **약 0.333 mm** (유전체 파장 λd / 15) | **Skin Effect(표피 효과):** 고주파에서 전류가 도체 표면/에지에 집중되므로 초미세 메쉬 필수 |
 | **픽셀 근처 공기** | 에어박스 내부 점증 비율 | **Growth Rate = 5** | **Fringing Field(가장자리 전기장):** 에지에서 공기로 튀어나오는 전자기파를 연속적으로 추적 |
-| **외곽 에어 영역** | 에어박스 외곽 최대 메쉬 크기 | **2.5 mm** (자유공간 파장 $\lambda_0 / 4$) | 방사 강도가 약한 허공 영역은 메쉬를 듬성하게 늘려 메모리와 해석 시간 대폭 절감 |
+| **외곽 에어 영역** | 에어박스 외곽 최대 메쉬 크기 | **2.5 mm** (자유공간 파장 λ0 / 4) | 방사 강도가 약한 허공 영역은 메쉬를 듬성하게 늘려 메모리와 해석 시간 대폭 절감 |
 | **수치해석 엔진** | 메쉬 생성 엔진 / FEM 솔버 | **GMSH / Intel MKL PARDISO** | 고성능 슈퍼컴퓨터 환경에 최적화된 다중 코어(8~16 Core) 병렬 희소 행렬 연산 |
 
 ---
@@ -128,13 +128,13 @@ graph TD
 ### 📈 5) 주파수 스윕(Frequency Sweep) 및 출력 데이터 규격
 | 구분 | 세부 항목 | 설정값 및 데이터 구성 | 비고 |
 | :--- | :--- | :--- | :--- |
-| **해석 주파수 대역**| 전체 해석 범위 (Sweep Range) | **0.1 GHz ~ 30.0 GHz** | 자유공간 파장 $\lambda_0 = 10\text{mm}$, 유전체 내 파장 $\lambda_d = 5\text{mm}$ (30GHz 기준) |
+| **해석 주파수 대역**| 전체 해석 범위 (Sweep Range) | **0.1 GHz ~ 30.0 GHz** | 자유공간 파장 λ0 = 10mm, 유전체 내 파장 λd = 5mm (30GHz 기준) |
 | | 총 샘플 포인트 수 | **총 91개 주파수 포인트** | 광대역 특성 곡선 복원용 |
 | **대역별 간격** | 저주파 대역 (0.1 ~ 1.5 GHz) | **0.5 GHz 스텝** (넓은 간격) | 불필요한 연산 낭비 억제 |
 | | **BPF 타깃 대역 (2.0 ~ 12.0 GHz)**| **0.2 GHz 스텝 (최고 밀집 간격)** | 실제 필터의 통과/저지대역 스펙 및 공진점을 극도로 정밀하게 계측 |
 | | 고주파 대역 (12.5 ~ 30.0 GHz) | **0.5 GHz 스텝** (넓은 간격) | 고주파 스퓨리어스(Spurious) 응답 모니터링 |
 | **추출 데이터** | 출력 데이터 포맷 3종 | **S2P, PNG, NPZ** | S2P(복소 S-파라미터), PNG(패턴 시각화), NPZ(25x25 바이너리 압축 배열) |
-| | AI 입력 차원 및 타깃 차원 | **입력: (1, 25, 25) $\rightarrow$ 출력: 273차원** | 91개 포인트 x ($S_{11}, S_{21}$ 크기 및 위상 성분)을 완벽하게 벡터화 |
+| | AI 입력 차원 및 타깃 차원 | **입력: (1, 25, 25) \rightarrow 출력: 273차원** | 91개 포인트 x (S11, S21 크기 및 위상 성분)을 완벽하게 벡터화 |
 
 ---
 
@@ -148,10 +148,10 @@ graph TD
 * Max Pooling 레이어는 `nn.Identity()`로 치환하여 소형 픽셀의 공간 해상도 손실을 방지했습니다.
 
 ### 2) 다층 회귀 헤드 (Multi-Stage Regression Head)
-* **ResNet50:** 2048 차원 특징 벡터 $\rightarrow$ `Linear(2048, 1024)` $\rightarrow$ `BatchNorm1d` $\rightarrow$ `ReLU` $\rightarrow$ `Dropout(0.3)` $\rightarrow$ `Linear(1024, 512)` $\rightarrow$ `BatchNorm1d` $\rightarrow$ `ReLU` $\rightarrow$ `Dropout(0.2)` $\rightarrow$ `Linear(512, 273)`
+* **ResNet50:** 2048 차원 특징 벡터 \rightarrow `Linear(2048, 1024)` \rightarrow `BatchNorm1d` \rightarrow `ReLU` \rightarrow `Dropout(0.3)` \rightarrow `Linear(1024, 512)` \rightarrow `BatchNorm1d` \rightarrow `ReLU` \rightarrow `Dropout(0.2)` \rightarrow `Linear(512, 273)`
 * **출력 273차원 구성:** 0.1GHz ~ 30GHz 구간의 총 91개 주파수 샘플 포인트에 대해 4개 S-파라미터 크기 및 위상 완벽 예측.
-  * Magnitude: $S_{11}(dB), S_{21}(dB)$ (주요 대역)
-  * Phase: $S_{11}(\theta), S_{21}(\theta)$
+  * Magnitude: S11(dB), S21(dB) (주요 대역)
+  * Phase: S11(Phase), S21(Phase)
 
 ---
 
@@ -160,10 +160,10 @@ graph TD
 슈퍼컴퓨터 및 서버 환경에서 GUI 없이 대량의 필터 후보군을 고속 탐색하는 최적화 엔진입니다.
 
 1. **타깃 스펙 정의 (Target Spec):**
-   * 통과대역 시작 주파수($f_{low}$) 및 종료 주파수($f_{high}$)
+   * 통과대역 시작 주파수(f_low) 및 종료 주파수(f_high)
    * 삽입 손실(Insertion Loss), 반사 손실(Return Loss), 저지대역 감쇠량(Stopband Loss)
 2. **복합 손실 함수 (Composite Cost Function):**
-   $$\text{Cost} = w_1 \cdot \text{Loss}_{\text{Passband}} + w_2 \cdot \text{Loss}_{\text{Stopband}} + w_3 \cdot \text{Loss}_{\text{ReturnLoss}} + w_{\text{DRC}} \cdot \text{Penalty}_{\text{DRC}}$$
+   Cost = w_1 \cdot Loss_{Passband} + w_2 \cdot Loss_{Stopband} + w_3 \cdot Loss_{ReturnLoss} + w_{DRC} \cdot Penalty_{DRC}
    * 실제 제작이 불가능한 고립 패턴(Floating Metal) 및 에칭 한계 미달 패턴에 강력한 페널티 부여 (DRC 필터링).
 3. **앙상블 대리 평가:** ResNet18, ResNet50, DenseNet 복수 모델의 추론 결과를 앙상블하여 예측 분산을 줄이고 전자기적 신뢰성을 극대화.
 
@@ -173,7 +173,7 @@ graph TD
 
 엔지니어가 복잡한 코드 없이 클릭 몇 번으로 필터를 역설계하고 검증할 수 있는 통합 워크스테이션입니다.
 
-* **Spec Controller:** $f_{low}, f_{high}$, 대역폭, 손실 허용치를 슬라이더 및 입력창으로 실시간 세팅.
+* **Spec Controller:** f_low, f_high, 대역폭, 손실 허용치를 슬라이더 및 입력창으로 실시간 세팅.
 * **Layout Grid View:** AI가 추천한 25×25 픽셀 레이아웃을 직관적인 2D 그래픽 뷰어로 표출하며, 엔지니어가 직접 마우스 클릭으로 패턴을 수정/추가 가능.
 * **S-Parameter & Smith Chart Display:** 
   * 목표 스펙 라인 vs AI 예측치 vs EM 실측치를 동일 그래프에 오버레이 표출.
@@ -214,7 +214,7 @@ RF_Reverse_Design_Filter_Project/
 ## 🏆 핵심 성과 및 의의 (Key Achievements)
 
 1. **압도적인 설계 시간 단축 (TAT 혁신):**
-   * 기존 3D EM 시뮬레이션 기반 반복 설계(수일~수주일 소요) $\rightarrow$ **딥러닝 대리 모델 역설계로 단 1분 이내에 최적 레이아웃 도출**.
+   * 기존 3D EM 시뮬레이션 기반 반복 설계(수일~수주일 소요) \rightarrow **딥러닝 대리 모델 역설계로 단 1분 이내에 최적 레이아웃 도출**.
 2. **100,000건 무인 데이터 파이프라인 완성:**
    * 리눅스 PBS 큐와 EMerge를 결합하여 서버 다운 없는 100% 무인 자동화 전자기 해석 인프라를 구축.
 3. **물리 기반 인공지능(Physics-Aware AI):**
